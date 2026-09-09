@@ -27,8 +27,9 @@ University project for FIPU (Informatics), combining two courses:
    matching listing.
 6. The listener detects the "reported" event; backend updates status so all
    users see it.
-7. Owner and finder coordinate a handover (via the backend's temporary
-   chat/contact storage).
+7. Owner and finder coordinate a handover via the backend's temporary,
+   wallet-signed chat (SQLite-backed `POST`/`GET /listings/:id/messages`
+   — see the storage service section below for the exact signing format).
 8. Owner releases the funds through the contract; listener detects it and
    backend marks the listing "Resolved".
 
@@ -107,15 +108,88 @@ Both pipelines run **test → lint → build** before allowing a deploy.
     "ipfs://<CID>"}`), returns the JSON's CID. This is the CID the frontend
     passes on-chain as `itemCID`, so the contract points at a metadata blob,
     not a bare image.
-- SQLite for temporary owner↔finder contact/chat data (not built yet)
+- **Owner↔finder messaging** (temporary handover coordination, SQLite-backed)
+  — no login system; wallet signatures over a canonical message ARE the
+  authentication, reusing the wallet identity already established on-chain:
+  - `POST /listings/{listingId}/messages` — submits a signed chat message.
+    Body: `{ timestamp, body, signature }` (`listingId` comes from the
+    URL, not the body, so it can't be spoofed independently of the
+    endpoint being authorized for). `timestamp` is Unix epoch **seconds**
+    (not milliseconds) and must be within 5 minutes of the server's
+    clock. `signature` is an EIP-191 `personal_sign` signature (e.g.
+    ethers.js `signer.signMessage(...)`, or MetaMask's `personal_sign`)
+    over the exact string:
+
+    ```
+    lost-and-found:message:v1:{listingId}:{timestamp}:{body}
+    ```
+
+    — decimal `listingId`/`timestamp`, `body` sent verbatim/untrimmed.
+    The server never parses this string back apart; it independently
+    rebuilds the same string from trusted inputs (URL `listingId`,
+    validated `timestamp`/`body`) and checks that reconstruction against
+    the signature, so the client must send exactly the string it signed.
+    The server recovers the signer from the signature and independently
+    reads the listing's current owner/finder from the chain (`web3.py`,
+    async `AsyncWeb3`/`AsyncHTTPProvider` so a chain read never blocks
+    the event loop — same public getters `scripts/check-listing.js`
+    uses, not a value trusted from the client) — only the owner or finder
+    may post. Returns `201` with the stored message (`{id, listingId,
+    sender, body, timestamp}`) or a clear error: `400` malformed
+    request/stale timestamp/blank or oversized body/malformed signature,
+    `403` signer isn't owner or finder, `404` unknown listing, `409`
+    exact replay (same listing/sender/timestamp already recorded), `500`
+    misconfigured (`SEPOLIA_RPC_URL` unset), `502` chain-read failure.
+  - `GET /listings/{listingId}/messages?timestamp=...&signature=...` —
+    fetches the thread in chronological order. Also requires a wallet
+    signature (query params, not a body) proving owner/finder — chosen
+    deliberately over leaving reads open, unlike the already-public
+    on-chain/IPFS listing data, message bodies may contain real
+    coordination details (a meeting spot, a phone number). Domain-
+    separated from the write format via a distinct canonical string so a
+    read-authorization signature can never be replayed as a message send,
+    or vice versa:
+
+    ```
+    lost-and-found:read-messages:v1:{listingId}:{timestamp}
+    ```
+
+    The client re-signs once per thread-open/poll cycle within the
+    5-minute freshness window, reusing the same verification path as
+    writes rather than a second bespoke auth mechanism — not on every
+    single poll, to avoid a wallet-popup-per-poll UX.
+  - Storage: SQLite, `messages` table (`id, listing_id, sender, body,
+    timestamp`), `UNIQUE(listing_id, sender, timestamp)` rejects an exact
+    replay of an already-accepted signed message outright. Path
+    configurable via `MESSAGES_DB_PATH` (default `messages.db`); on
+    Render's ephemeral filesystem this does **not** survive a
+    redeploy/restart — deliberate "temporary" storage as originally
+    scoped here, not a bug.
+  - Needs `SEPOLIA_RPC_URL` (read-only, no private key) and
+    `CONTRACT_ADDRESS` (defaults to the address in
+    `deployments/sepolia.json`) to read the contract — storage-service
+    has its own separate `.env` from the root Hardhat one, so these must
+    be set there too.
+  - Sending a message (`POST`) shares the same rate-limit budget as
+    `/upload`/`/listing-metadata` (guards against DB write spam); reading
+    (`GET`) is exempt — same "don't rate-limit cheap, idempotent reads"
+    reasoning as the rest of this service.
+  - Full replay resistance (e.g. a server-issued nonce) isn't
+    implemented — the 5-minute timestamp window plus the DB's uniqueness
+    constraint is the accepted tradeoff here, consistent with the "no
+    funds move through this service" reasoning below: this is a
+    temporary handover chat, not something securing value.
 - Validation: Pydantic
-- **Rate limiting, no auth layer** (deliberate scoping decision, not an
-  oversight): `/upload` and `/listing-metadata` are rate-limited per client
-  (in-memory sliding window, `RATE_LIMIT_REQUESTS_PER_MINUTE`, default 10
-  requests/minute, shared across both endpoints since they both burn the
-  same Pinata quota; `X-Forwarded-For`'s first hop is preferred over the
-  raw peer address so this still works correctly behind Render's reverse
-  proxy in production). There is deliberately **no API key/auth layer** in
+- **Rate limiting, no separate auth layer on the upload endpoints**
+  (deliberate scoping decision, not an oversight — the messaging endpoints
+  above DO require wallet-signature authentication, since unlike a bare
+  IPFS upload, only that listing's owner/finder should be able to post or
+  read its messages): `/upload` and `/listing-metadata` are rate-limited
+  per client (in-memory sliding window, `RATE_LIMIT_REQUESTS_PER_MINUTE`,
+  default 10 requests/minute, shared across both endpoints since they both
+  burn the same Pinata quota; `X-Forwarded-For`'s first hop is preferred
+  over the raw peer address so this still works correctly behind Render's
+  reverse proxy in production). There is deliberately **no API key/auth layer** in
   front of them, even though anyone who knows the URL can call them.
   Rationale: this service only brokers IPFS uploads — it holds no funds
   and makes no on-chain state changes itself. The actual value transfer
