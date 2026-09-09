@@ -1,0 +1,16 @@
+# This repo tracks only workspace-root-level files (project docs, shared
+# config). lost-and-found-back and lost-and-found-front are each their own
+# independent git repository with their own remote/CI/CD -- never track
+# their contents here, even accidentally via `git add -A`.
+/lost-and-found-back/
+/lost-and-found-front/
+
+# Claude Code's local project state (session data, memory) -- machine-
+# local tooling config, not project source.
+/.claude/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
