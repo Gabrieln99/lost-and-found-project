@@ -63,6 +63,10 @@ aiohttp REST API.
 - Preserve existing naming conventions, folder structure, and formatting.
 - Make the smallest safe change that solves the task; avoid large rewrites
   unless explicitly requested.
+- **YAGNI**: don't add code, dependencies, configuration, or files for
+  functionality that isn't actually needed right now — not for something that
+  "might be useful later." If a later task needs it, add it then. This applies
+  to every repo in this project, not just the one currently being worked on.
 - Never commit secrets (Pinata API key/JWT, private keys, RPC URLs) — these
   come from environment variables / GitHub Actions secrets, never hardcoded.
 
